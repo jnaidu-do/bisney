@@ -84,19 +84,12 @@ def inject_latency():
     else:
         time.sleep(random.uniform(0.01, 0.05))
 
-# --- CONTROLLED DDOS GENERATOR (~500 RPS) ---
-# --- EXPONENTIAL DDOS GENERATOR ---
-# --- AGGRESSIVE EXPONENTIAL DDOS GENERATOR ---
-# --- ECO-MODE DDOS GENERATOR (Safe for Small Droplets) ---
+# --- ECO-MODE DDOS GENERATOR ---
 def background_ddos_generator():
     """
-    Eco-Mode Attacker:
-    - distinct pauses to let the CPU breathe.
-    - Uses Session pooling for efficiency, but throttles speed.
-    - Targets ~50 RPS per thread.
+    Eco-Mode Attacker: Safe for small droplets (~150 RPS total).
     """
     session = requests.Session()
-    # Pool size matches our batch size to avoid recreating connections
     adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
     session.mount('http://', adapter)
     
@@ -105,29 +98,25 @@ def background_ddos_generator():
     while True:
         if SIMULATION_CONFIG["ddos_mode"]:
             try:
-                # Fire a small, fixed batch of 5 requests
+                # Fire small batch
                 for _ in range(5):
                     try:
                         if random.random() > 0.5:
-                            # Short timeout so we don't hang if server lags
                             session.post(f'{base_url}/cart', json={"product_name": "DDoS-Bot", "tenant": "attacker"}, timeout=0.05)
                         else:
                             session.post(f'{base_url}/favorite', json={"product_id": 999, "tenant": "attacker"}, timeout=0.05)
                     except:
-                        pass # Just skip failed requests
+                        pass 
 
-                # CRITICAL: Sleep 0.1s to yield CPU to the main server thread
-                # Calculation: 5 reqs / 0.1s pause = ~50 requests per second per thread
+                # Sleep to yield CPU
                 time.sleep(0.1) 
                 
             except Exception:
-                # If massive errors, back off more
                 time.sleep(0.5)
         else:
-            # Sleep while idle
-            time.sleep(1.0)
+            time.sleep(1.0) 
 
-# Start 3 concurrent attacker threads (Safe, Steady Load)
+# Start 3 concurrent attacker threads
 for _ in range(3):
     threading.Thread(target=background_ddos_generator, daemon=True).start()
 
@@ -190,6 +179,10 @@ HTML_TEMPLATE = """
         .admin-btn:hover { transform: translateY(-2px); }
         .admin-btn.active { background: #0069FF; color: white; border-color: #0069FF; }
         .admin-btn.ddos.active { background: #E53E3E; border-color: #E53E3E; }
+        /* NEW: Reset Button Style */
+        .admin-btn.reset { background: #2D3748; color: white; border-color: #2D3748; justify-content: center; }
+        .admin-btn.reset:hover { background: #1A202C; }
+        
         .status-dot { height: 8px; width: 8px; border-radius: 50%; background: #CBD5E0; }
         .active .status-dot { background: #48BB78; box-shadow: 0 0 0 2px rgba(255,255,255,0.4); }
         
@@ -251,6 +244,9 @@ HTML_TEMPLATE = """
         <button class="admin-btn ddos" id="ddosBtn" onclick="toggleMode('ddos')">
             <span>🔥 DDoS Mode</span> <div class="status-dot"></div>
         </button>
+        <button class="admin-btn reset" onclick="resetCounters()">
+            <span>🔄 Reset Counters</span>
+        </button>
     </div>
 
     <div class="footer"><p>System Health: <a href="/metrics">View Metrics</a> | Powered by Bisney</p></div>
@@ -280,7 +276,7 @@ HTML_TEMPLATE = """
                 });
                 if (response.ok) {
                     showToast('Added to Cart', `${productName} added successfully!`, 'success');
-                    syncStats(); // Sync immediately
+                    syncStats(); 
                 } else {
                     showToast('Payment Error', 'Payment gateway timeout', 'error');
                 }
@@ -296,7 +292,7 @@ HTML_TEMPLATE = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({product_id: productId})
                 });
-                syncStats(); // Sync immediately
+                syncStats(); 
             } catch (error) { btn.classList.toggle('active'); }
         }
 
@@ -316,8 +312,17 @@ HTML_TEMPLATE = """
             } catch (e) { console.error(e); }
         }
 
+        async function resetCounters() {
+            try {
+                const response = await fetch('/simulation/reset', { method: 'POST' });
+                if (response.ok) {
+                    showToast('Reset Complete', 'All counters set to zero', 'success');
+                    syncStats(); // Refresh immediately
+                }
+            } catch (e) { console.error(e); }
+        }
+
         // --- LIVE STATS SYNC ---
-        // This polls the server every 1 second to update badges with Bot Traffic
         async function syncStats() {
             try {
                 const response = await fetch('/stats');
@@ -343,18 +348,25 @@ def index():
 
 @app.route('/stats')
 def stats():
-    """Return global counters so frontend can sync with bots"""
     return jsonify({
         "cart": GLOBAL_CART_COUNT,
         "fav": GLOBAL_FAV_COUNT
     })
+
+# NEW ENDPOINT: Reset Counters
+@app.route('/simulation/reset', methods=['POST'])
+def reset_counters():
+    global GLOBAL_CART_COUNT, GLOBAL_FAV_COUNT
+    GLOBAL_CART_COUNT = 0
+    GLOBAL_FAV_COUNT = 0
+    logger.info("Counters reset manually", extra={"event": "reset_counters"})
+    return jsonify({"status": "reset_complete"}), 200
 
 @app.route('/cart', methods=['POST'])
 def cart_checkout():
     global GLOBAL_CART_COUNT
     inject_latency()
 
-    # Increment Global Counter (Thread-safe in CPython for simple increment)
     GLOBAL_CART_COUNT += 1
 
     data = request.get_json() or {}
@@ -382,7 +394,6 @@ def favorite_product():
     global GLOBAL_FAV_COUNT
     inject_latency()
     
-    # Increment Global Counter
     GLOBAL_FAV_COUNT += 1
     
     tenant_id = 'favorites'
@@ -424,5 +435,5 @@ def metrics():
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 if __name__ == '__main__':
-    logger.info("Bisney v2.2 Starting...", extra={"event": "startup"})
+    logger.info("Bisney v2.3 Starting...", extra={"event": "startup"})
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
