@@ -21,6 +21,10 @@ SIMULATION_CONFIG = {
     "latency_mode": False
 }
 
+# GLOBAL COUNTERS (To track total traffic including Bots)
+GLOBAL_CART_COUNT = 0
+GLOBAL_FAV_COUNT = 0
+
 # --- LOGGING SETUP ---
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -42,7 +46,6 @@ bisney_requests_total = Counter(
     ['tenant_id', 'status']
 )
 
-# Latency Histogram (Buckets optimized for visualizing the 2s-5s latency mode)
 bisney_request_duration_seconds = Histogram(
     'bisney_request_duration_seconds',
     'Request duration in seconds',
@@ -77,20 +80,18 @@ PRODUCTS = [
 def inject_latency():
     """Injects artificial latency based on the current mode."""
     if SIMULATION_CONFIG["latency_mode"]:
-        # Simulate heavy DB load or lock (2s to 5s)
         time.sleep(random.uniform(2.0, 5.0))
     else:
-        # Normal operation (very fast)
         time.sleep(random.uniform(0.01, 0.05))
 
-# --- NUCLEAR DDOS GENERATOR ---
+# --- CONTROLLED DDOS GENERATOR (~500 RPS) ---
 def background_ddos_generator():
     """
-    Optimized attacker using Session pooling.
-    Spams BOTH /cart and /favorite endpoints.
+    Tuned attacker: Uses sessions for speed but sleeps slightly 
+    to prevent starving the /metrics endpoint.
     """
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
     session.mount('http://', adapter)
     
     base_url = 'http://127.0.0.1:5001'
@@ -98,18 +99,22 @@ def background_ddos_generator():
     while True:
         if SIMULATION_CONFIG["ddos_mode"]:
             try:
-                # Randomly attack Cart (DB write) or Favorite (Cache read)
+                # Randomly attack Cart or Favorite
                 if random.random() > 0.5:
                     session.post(f'{base_url}/cart', json={"product_name": "DDoS-Bot", "tenant": "attacker"}, timeout=0.1)
                 else:
                     session.post(f'{base_url}/favorite', json={"product_id": 999, "tenant": "attacker"}, timeout=0.1)
+                
+                # Sleep 10ms (5 threads * 100 RPS = 500 Total RPS)
+                time.sleep(0.01) 
+                
             except Exception:
-                pass
+                time.sleep(0.05)
         else:
-            time.sleep(1.0) # Sleep while idle
+            time.sleep(1.0) 
 
-# Start 50 concurrent attacker threads (The "Botnet")
-for _ in range(50):
+# Start 5 concurrent attacker threads
+for _ in range(5):
     threading.Thread(target=background_ddos_generator, daemon=True).start()
 
 # --- HTML UI ---
@@ -130,7 +135,6 @@ HTML_TEMPLATE = """
         .nav-links a { color: #4A5568; text-decoration: none; font-size: 0.95em; font-weight: 500; transition: color 0.2s; }
         .nav-links a:hover { color: #0069FF; }
         
-        /* Nav Icons with Badges */
         .nav-icon { position: relative; font-size: 1.2em; cursor: pointer; }
         .badge { 
             position: absolute; top: -8px; right: -8px; 
@@ -238,10 +242,6 @@ HTML_TEMPLATE = """
     <div class="footer"><p>System Health: <a href="/metrics">View Metrics</a> | Powered by Bisney</p></div>
 
     <script>
-        // Global Counters
-        let cartTotal = 0;
-        let favTotal = 0;
-
         function updateBadge(id, count) {
             const el = document.getElementById(id);
             el.textContent = count;
@@ -265,10 +265,8 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({product_id: productId, product_name: productName})
                 });
                 if (response.ok) {
-                    // Update UI Counter
-                    cartTotal++;
-                    updateBadge('cart-count', cartTotal);
                     showToast('Added to Cart', `${productName} added successfully!`, 'success');
+                    syncStats(); // Sync immediately
                 } else {
                     showToast('Payment Error', 'Payment gateway timeout', 'error');
                 }
@@ -277,26 +275,15 @@ HTML_TEMPLATE = """
 
         async function toggleFavorite(productId) {
             const btn = document.getElementById('fav-' + productId);
-            const isAdding = !btn.classList.contains('active');
-            
             btn.classList.toggle('active');
-            
-            // Optimistic UI update
-            if (isAdding) favTotal++; else favTotal--;
-            updateBadge('fav-count', favTotal);
-
             try {
                 await fetch('/favorite', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({product_id: productId})
                 });
-            } catch (error) { 
-                // Revert if failed
-                btn.classList.toggle('active');
-                if (isAdding) favTotal--; else favTotal++;
-                updateBadge('fav-count', favTotal);
-            }
+                syncStats(); // Sync immediately
+            } catch (error) { btn.classList.toggle('active'); }
         }
 
         async function toggleMode(mode) {
@@ -314,6 +301,21 @@ HTML_TEMPLATE = """
                 }
             } catch (e) { console.error(e); }
         }
+
+        // --- LIVE STATS SYNC ---
+        // This polls the server every 1 second to update badges with Bot Traffic
+        async function syncStats() {
+            try {
+                const response = await fetch('/stats');
+                const data = await response.json();
+                updateBadge('cart-count', data.cart);
+                updateBadge('fav-count', data.fav);
+            } catch(e) { console.log("Stats sync failed"); }
+        }
+
+        // Start polling
+        setInterval(syncStats, 1000);
+        syncStats(); // Initial load
     </script>
 </body>
 </html>
@@ -325,11 +327,21 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE, products=PRODUCTS)
 
+@app.route('/stats')
+def stats():
+    """Return global counters so frontend can sync with bots"""
+    return jsonify({
+        "cart": GLOBAL_CART_COUNT,
+        "fav": GLOBAL_FAV_COUNT
+    })
+
 @app.route('/cart', methods=['POST'])
 def cart_checkout():
-    """Handle cart checkout with latency tracking"""
-    
+    global GLOBAL_CART_COUNT
     inject_latency()
+
+    # Increment Global Counter (Thread-safe in CPython for simple increment)
+    GLOBAL_CART_COUNT += 1
 
     data = request.get_json() or {}
     product_name = data.get('product_name', 'Unknown')
@@ -340,7 +352,6 @@ def cart_checkout():
             span.set_attribute("tenant_id", tenant_id)
             span.set_attribute("product", product_name)
             
-            # Simulate random failure (10% chance)
             if random.random() < 0.1:
                 logger.error("Payment failed", extra={"event": "payment_failure", "tenant_id": tenant_id})
                 span.set_status(Status(StatusCode.ERROR, "Payment failed"))
@@ -354,8 +365,11 @@ def cart_checkout():
 
 @app.route('/favorite', methods=['POST'])
 def favorite_product():
-    
+    global GLOBAL_FAV_COUNT
     inject_latency()
+    
+    # Increment Global Counter
+    GLOBAL_FAV_COUNT += 1
     
     tenant_id = 'favorites'
     
@@ -363,7 +377,6 @@ def favorite_product():
         with tracer.start_as_current_span("favorite_toggle") as span:
             span.set_attribute("tenant_id", tenant_id)
             
-            # Simulate Cache Hit/Miss
             if random.random() < 0.7:
                 logger.info("Cache hit", extra={"event": "cache_hit", "tenant_id": tenant_id})
                 bisney_cache_hits.labels(tenant_id=tenant_id, result='hit').inc()
@@ -397,5 +410,5 @@ def metrics():
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 if __name__ == '__main__':
-    logger.info("Bisney v2.1 Starting...", extra={"event": "startup"})
+    logger.info("Bisney v2.2 Starting...", extra={"event": "startup"})
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
