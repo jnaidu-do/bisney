@@ -365,15 +365,20 @@ def reset_counters():
 @app.route('/cart', methods=['POST'])
 def cart_checkout():
     global GLOBAL_CART_COUNT
-    inject_latency()
-
-    GLOBAL_CART_COUNT += 1
-
+    
     data = request.get_json() or {}
     product_name = data.get('product_name', 'Unknown')
     tenant_id = 'merch'
     
+    # START THE TIMER FIRST
     with bisney_request_duration_seconds.labels(tenant_id=tenant_id, endpoint='/cart').time():
+        
+        # NOW we inject latency (so it gets measured)
+        inject_latency() 
+
+        # Increment Global Counter
+        GLOBAL_CART_COUNT += 1
+        
         with tracer.start_as_current_span("checkout_flow") as span:
             span.set_attribute("tenant_id", tenant_id)
             span.set_attribute("product", product_name)
@@ -392,13 +397,16 @@ def cart_checkout():
 @app.route('/favorite', methods=['POST'])
 def favorite_product():
     global GLOBAL_FAV_COUNT
-    inject_latency()
-    
-    GLOBAL_FAV_COUNT += 1
-    
     tenant_id = 'favorites'
     
+    # START THE TIMER FIRST
     with bisney_request_duration_seconds.labels(tenant_id=tenant_id, endpoint='/favorite').time():
+        
+        # NOW we inject latency
+        inject_latency()
+        
+        GLOBAL_FAV_COUNT += 1
+        
         with tracer.start_as_current_span("favorite_toggle") as span:
             span.set_attribute("tenant_id", tenant_id)
             
