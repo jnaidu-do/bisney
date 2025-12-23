@@ -21,9 +21,10 @@ SIMULATION_CONFIG = {
     "latency_mode": False
 }
 
-# GLOBAL COUNTERS (To track total traffic including Bots)
+# GLOBAL COUNTERS
 GLOBAL_CART_COUNT = 0
 GLOBAL_FAV_COUNT = 0
+DDOS_START_TIME = 0  # NEW: Tracks when the attack started
 
 # --- LOGGING SETUP ---
 logger = logging.getLogger()
@@ -65,6 +66,24 @@ bisney_cache_hits = Counter(
     ['tenant_id', 'result']
 )
 
+bisney_revenue_dollars_total = Counter(
+    'bisney_revenue_dollars_total',
+    'Total revenue in USD',
+    ['tenant_id']
+)
+
+bisney_items_sold_total = Counter(
+    'bisney_items_sold_total',
+    'Count of specific items sold',
+    ['tenant_id', 'product_name']
+)
+
+bisney_active_requests = Gauge(
+    'bisney_active_requests',
+    'Number of requests currently being processed',
+    ['tenant_id', 'endpoint']
+)
+
 # Product catalog
 PRODUCTS = [
     {"id": 1, "name": "Giant Conch Shell", "price": 12.50, "icon": "🐚", "desc": "Authentic ocean sound"},
@@ -84,33 +103,44 @@ def inject_latency():
     else:
         time.sleep(random.uniform(0.01, 0.05))
 
+def get_error_probability():
+    """
+    Calculates error chance based on DDoS duration.
+    - Normal: 0%
+    - DDoS Start: 0%
+    - DDoS + 30s: 20%
+    - DDoS + 60s: 50% (Max)
+    """
+    if not SIMULATION_CONFIG["ddos_mode"]:
+        return 0.0 # Clean health in normal mode
+    
+    elapsed = time.time() - DDOS_START_TIME
+    
+    # Ramp up errors over 60 seconds
+    if elapsed < 5: return 0.0       # Grace period
+    if elapsed < 20: return 0.05     # Mild stutter
+    if elapsed < 40: return 0.20     # Serious issues
+    return 0.50                      # System melt-down
+
 # --- ECO-MODE DDOS GENERATOR ---
 def background_ddos_generator():
-    """
-    Eco-Mode Attacker: Safe for small droplets (~150 RPS total).
-    """
+    """Eco-Mode Attacker: Safe for small droplets."""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
     session.mount('http://', adapter)
-    
     base_url = 'http://127.0.0.1:5001'
     
     while True:
         if SIMULATION_CONFIG["ddos_mode"]:
             try:
-                # Fire small batch
                 for _ in range(5):
                     try:
                         if random.random() > 0.5:
                             session.post(f'{base_url}/cart', json={"product_name": "DDoS-Bot", "tenant": "attacker"}, timeout=0.05)
                         else:
                             session.post(f'{base_url}/favorite', json={"product_id": 999, "tenant": "attacker"}, timeout=0.05)
-                    except:
-                        pass 
-
-                # Sleep to yield CPU
+                    except: pass 
                 time.sleep(0.1) 
-                
             except Exception:
                 time.sleep(0.5)
         else:
@@ -137,18 +167,9 @@ HTML_TEMPLATE = """
         .nav-links { display: flex; gap: 30px; align-items: center; }
         .nav-links a { color: #4A5568; text-decoration: none; font-size: 0.95em; font-weight: 500; transition: color 0.2s; }
         .nav-links a:hover { color: #0069FF; }
-        
         .nav-icon { position: relative; font-size: 1.2em; cursor: pointer; }
-        .badge { 
-            position: absolute; top: -8px; right: -8px; 
-            background: #E53E3E; color: white; 
-            font-size: 0.6em; font-weight: bold; 
-            padding: 2px 6px; border-radius: 10px; 
-            min-width: 18px; text-align: center;
-            opacity: 0; transition: opacity 0.2s;
-        }
+        .badge { position: absolute; top: -8px; right: -8px; background: #E53E3E; color: white; font-size: 0.6em; font-weight: bold; padding: 2px 6px; border-radius: 10px; min-width: 18px; text-align: center; opacity: 0; transition: opacity 0.2s; }
         .badge.visible { opacity: 1; }
-
         .hero { background: linear-gradient(135deg, #0069FF 0%, #0080FF 50%, #00A6FF 100%); color: white; padding: 80px 20px; text-align: center; position: relative; overflow: hidden; }
         .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
         .products-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 30px; }
@@ -167,25 +188,20 @@ HTML_TEMPLATE = """
         .btn-favorite { background: #F7F9FC; color: #4A5568; border: 1px solid #E5E8ED; flex: 0 0 auto; padding: 12px 16px; }
         .btn-favorite:hover { background: #EDF2F7; }
         .btn-favorite.active { background: #FEE; color: #E53E3E; border-color: #E53E3E; }
-        
         .toast { position: fixed; top: 80px; right: 20px; max-width: 350px; background: white; padding: 16px 20px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); display: none; animation: slideIn 0.3s ease; z-index: 1000; border: 1px solid #E5E8ED; }
         .toast.show { display: block; }
         .toast.success { border-left: 4px solid #48BB78; }
         .toast.error { border-left: 4px solid #F56565; }
         @keyframes slideIn { from { transform: translateX(400px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-        
         .admin-controls { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 10px; }
         .admin-btn { padding: 12px 16px; cursor: pointer; font-size: 0.85em; font-weight: 600; background: white; color: #4A5568; box-shadow: 0 2px 8px rgba(0,0,0,0.1); transition: all 0.2s; min-width: 160px; border: 1px solid #E5E8ED; border-radius: 6px; text-align: left; display: flex; justify-content: space-between; align-items: center; }
         .admin-btn:hover { transform: translateY(-2px); }
         .admin-btn.active { background: #0069FF; color: white; border-color: #0069FF; }
         .admin-btn.ddos.active { background: #E53E3E; border-color: #E53E3E; }
-        /* NEW: Reset Button Style */
         .admin-btn.reset { background: #2D3748; color: white; border-color: #2D3748; justify-content: center; }
         .admin-btn.reset:hover { background: #1A202C; }
-        
         .status-dot { height: 8px; width: 8px; border-radius: 50%; background: #CBD5E0; }
         .active .status-dot { background: #48BB78; box-shadow: 0 0 0 2px rgba(255,255,255,0.4); }
-        
         .footer { background: white; padding: 40px 20px; text-align: center; color: #718096; font-size: 0.9em; margin-top: 60px; border-top: 1px solid #E5E8ED; }
         .footer a { color: #0069FF; text-decoration: none; font-weight: 500 }
     </style>
@@ -197,22 +213,13 @@ HTML_TEMPLATE = """
             <div class="nav-links">
                 <a href="#">Shop</a>
                 <a href="#">Rentals</a>
-                
-                <div class="nav-icon">
-                    ❤️ <span class="badge" id="fav-count">0</span>
-                </div>
-                <div class="nav-icon">
-                    🛒 <span class="badge" id="cart-count">0</span>
-                </div>
-                
+                <div class="nav-icon">❤️ <span class="badge" id="fav-count">0</span></div>
+                <div class="nav-icon">🛒 <span class="badge" id="cart-count">0</span></div>
                 <a href="/metrics">Metrics</a>
             </div>
         </div>
     </div>
-    <div class="hero">
-        <h1>Premium Ocean Essentials</h1>
-        <p>Build the perfect sandcastle and relax in style</p>
-    </div>
+    <div class="hero"><h1>Premium Ocean Essentials</h1><p>Build the perfect sandcastle and relax in style</p></div>
     <div class="container">
         <div class="products-grid">
             {% for product in products %}
@@ -231,26 +238,13 @@ HTML_TEMPLATE = """
             {% endfor %}
         </div>
     </div>
-    
-    <div id="toast" class="toast">
-        <div style="font-weight:600; margin-bottom:4px" id="toastTitle"></div>
-        <div style="font-size:0.9em; color:#718096" id="toastMessage"></div>
-    </div>
-
+    <div id="toast" class="toast"><div style="font-weight:600; margin-bottom:4px" id="toastTitle"></div><div style="font-size:0.9em; color:#718096" id="toastMessage"></div></div>
     <div class="admin-controls">
-        <button class="admin-btn" id="latencyBtn" onclick="toggleMode('latency')">
-            <span>🐢 Latency Mode</span> <div class="status-dot"></div>
-        </button>
-        <button class="admin-btn ddos" id="ddosBtn" onclick="toggleMode('ddos')">
-            <span>🔥 DDoS Mode</span> <div class="status-dot"></div>
-        </button>
-        <button class="admin-btn reset" onclick="resetCounters()">
-            <span>🔄 Reset Counters</span>
-        </button>
+        <button class="admin-btn" id="latencyBtn" onclick="toggleMode('latency')"><span>🐢 Latency Mode</span> <div class="status-dot"></div></button>
+        <button class="admin-btn ddos" id="ddosBtn" onclick="toggleMode('ddos')"><span>🔥 DDoS Mode</span> <div class="status-dot"></div></button>
+        <button class="admin-btn reset" onclick="resetCounters()"><span>🔄 Reset Counters</span></button>
     </div>
-
     <div class="footer"><p>System Health: <a href="/metrics">View Metrics</a> | Powered by Bisney</p></div>
-
     <script>
         function updateBadge(id, count) {
             const el = document.getElementById(id);
@@ -258,7 +252,6 @@ HTML_TEMPLATE = """
             if (count > 0) el.classList.add('visible');
             else el.classList.remove('visible');
         }
-
         function showToast(title, message, type) {
             const toast = document.getElementById('toast');
             toast.className = 'toast show ' + type;
@@ -266,75 +259,36 @@ HTML_TEMPLATE = """
             document.getElementById('toastMessage').textContent = message;
             setTimeout(() => { toast.classList.remove('show'); }, 3000);
         }
-
         async function addToCart(productId, productName) {
             try {
                 const response = await fetch('/cart', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({product_id: productId, product_name: productName})
                 });
-                if (response.ok) {
-                    showToast('Added to Cart', `${productName} added successfully!`, 'success');
-                    syncStats(); 
-                } else {
-                    showToast('Payment Error', 'Payment gateway timeout', 'error');
-                }
+                if (response.ok) { showToast('Added to Cart', `${productName} added!`, 'success'); syncStats(); } 
+                else { showToast('Server Error', 'System Overload', 'error'); }
             } catch (error) { showToast('Error', 'Unable to reach server', 'error'); }
         }
-
         async function toggleFavorite(productId) {
-            const btn = document.getElementById('fav-' + productId);
-            btn.classList.toggle('active');
-            try {
-                await fetch('/favorite', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({product_id: productId})
-                });
-                syncStats(); 
-            } catch (error) { btn.classList.toggle('active'); }
+            const btn = document.getElementById('fav-' + productId); btn.classList.toggle('active');
+            try { await fetch('/favorite', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({product_id: productId}) }); syncStats(); } catch (e) { btn.classList.toggle('active'); }
         }
-
         async function toggleMode(mode) {
             try {
                 const response = await fetch('/simulation/' + mode, { method: 'POST' });
                 const data = await response.json();
-                
                 const btn = document.getElementById(mode + 'Btn');
-                if (data.active) {
-                    btn.classList.add('active');
-                    showToast('Simulation Enabled', `${mode.toUpperCase()} mode is now ACTIVE`, 'error');
-                } else {
-                    btn.classList.remove('active');
-                    showToast('Simulation Disabled', `${mode.toUpperCase()} mode is now OFF`, 'success');
-                }
+                if (data.active) { btn.classList.add('active'); showToast('Simulation ON', `${mode.toUpperCase()} Active`, 'error'); } 
+                else { btn.classList.remove('active'); showToast('Simulation OFF', `${mode.toUpperCase()} Stopped`, 'success'); }
             } catch (e) { console.error(e); }
         }
-
         async function resetCounters() {
-            try {
-                const response = await fetch('/simulation/reset', { method: 'POST' });
-                if (response.ok) {
-                    showToast('Reset Complete', 'All counters set to zero', 'success');
-                    syncStats(); // Refresh immediately
-                }
-            } catch (e) { console.error(e); }
+            try { const response = await fetch('/simulation/reset', { method: 'POST' }); if (response.ok) { showToast('Reset', 'Counters cleared', 'success'); syncStats(); } } catch (e) {}
         }
-
-        // --- LIVE STATS SYNC ---
         async function syncStats() {
-            try {
-                const response = await fetch('/stats');
-                const data = await response.json();
-                updateBadge('cart-count', data.cart);
-                updateBadge('fav-count', data.fav);
-            } catch(e) { console.log("Stats sync failed"); }
+            try { const response = await fetch('/stats'); const data = await response.json(); updateBadge('cart-count', data.cart); updateBadge('fav-count', data.fav); } catch(e) {}
         }
-
-        // Start polling
-        setInterval(syncStats, 1000);
-        syncStats(); // Initial load
+        setInterval(syncStats, 1000); syncStats();
     </script>
 </body>
 </html>
@@ -348,76 +302,70 @@ def index():
 
 @app.route('/stats')
 def stats():
-    return jsonify({
-        "cart": GLOBAL_CART_COUNT,
-        "fav": GLOBAL_FAV_COUNT
-    })
+    return jsonify({"cart": GLOBAL_CART_COUNT, "fav": GLOBAL_FAV_COUNT})
 
-# NEW ENDPOINT: Reset Counters
 @app.route('/simulation/reset', methods=['POST'])
 def reset_counters():
-    global GLOBAL_CART_COUNT, GLOBAL_FAV_COUNT
+    global GLOBAL_CART_COUNT, GLOBAL_FAV_COUNT, DDOS_START_TIME
     GLOBAL_CART_COUNT = 0
     GLOBAL_FAV_COUNT = 0
-    logger.info("Counters reset manually", extra={"event": "reset_counters"})
+    DDOS_START_TIME = 0
     return jsonify({"status": "reset_complete"}), 200
 
 @app.route('/cart', methods=['POST'])
 def cart_checkout():
     global GLOBAL_CART_COUNT
+    bisney_active_requests.labels(tenant_id='merch', endpoint='/cart').inc()
     
-    data = request.get_json() or {}
-    product_name = data.get('product_name', 'Unknown')
-    tenant_id = 'merch'
-    
-    # START THE TIMER FIRST
-    with bisney_request_duration_seconds.labels(tenant_id=tenant_id, endpoint='/cart').time():
+    try:
+        data = request.get_json() or {}
+        product_name = data.get('product_name', 'Unknown')
+        product_price = next((p['price'] for p in PRODUCTS if p['name'] == product_name), 10.0)
+        tenant_id = 'merch'
         
-        # NOW we inject latency (so it gets measured)
-        inject_latency() 
-
-        # Increment Global Counter
-        GLOBAL_CART_COUNT += 1
-        
-        with tracer.start_as_current_span("checkout_flow") as span:
-            span.set_attribute("tenant_id", tenant_id)
-            span.set_attribute("product", product_name)
+        with bisney_request_duration_seconds.labels(tenant_id=tenant_id, endpoint='/cart').time():
+            inject_latency()
+            GLOBAL_CART_COUNT += 1
             
-            if random.random() < 0.1:
-                logger.error("Payment failed", extra={"event": "payment_failure", "tenant_id": tenant_id})
-                span.set_status(Status(StatusCode.ERROR, "Payment failed"))
-                bisney_requests_total.labels(tenant_id=tenant_id, status='error').inc()
-                return jsonify({"error": "Payment timeout"}), 500
-            else:
-                logger.info("Checkout success", extra={"event": "checkout_success", "tenant_id": tenant_id})
-                span.set_status(Status(StatusCode.OK))
-                bisney_requests_total.labels(tenant_id=tenant_id, status='success').inc()
-                return jsonify({"message": "Success"}), 200
+            with tracer.start_as_current_span("checkout_flow") as span:
+                span.set_attribute("tenant_id", tenant_id)
+                span.set_attribute("product", product_name)
+                
+                # --- NEW ERROR LOGIC ---
+                # Error probability depends on DDoS duration (0% -> 50%)
+                current_error_rate = get_error_probability()
+                
+                if random.random() < current_error_rate:
+                    logger.error("System Overload", extra={"event": "payment_failure", "rate": current_error_rate})
+                    span.set_status(Status(StatusCode.ERROR, "Overload"))
+                    bisney_requests_total.labels(tenant_id=tenant_id, status='error').inc()
+                    return jsonify({"error": "Service Unavailable"}), 500
+                else:
+                    logger.info("Checkout success", extra={"event": "checkout_success"})
+                    bisney_revenue_dollars_total.labels(tenant_id=tenant_id).inc(product_price)
+                    bisney_items_sold_total.labels(tenant_id=tenant_id, product_name=product_name).inc()
+                    span.set_status(Status(StatusCode.OK))
+                    bisney_requests_total.labels(tenant_id=tenant_id, status='success').inc()
+                    return jsonify({"message": "Success"}), 200
+    finally:
+        bisney_active_requests.labels(tenant_id='merch', endpoint='/cart').dec()
 
 @app.route('/favorite', methods=['POST'])
 def favorite_product():
     global GLOBAL_FAV_COUNT
     tenant_id = 'favorites'
     
-    # START THE TIMER FIRST
     with bisney_request_duration_seconds.labels(tenant_id=tenant_id, endpoint='/favorite').time():
-        
-        # NOW we inject latency
         inject_latency()
-        
         GLOBAL_FAV_COUNT += 1
         
         with tracer.start_as_current_span("favorite_toggle") as span:
             span.set_attribute("tenant_id", tenant_id)
-            
             if random.random() < 0.7:
-                logger.info("Cache hit", extra={"event": "cache_hit", "tenant_id": tenant_id})
                 bisney_cache_hits.labels(tenant_id=tenant_id, result='hit').inc()
             else:
-                logger.warning("Cache miss", extra={"event": "cache_miss", "tenant_id": tenant_id})
                 bisney_cache_hits.labels(tenant_id=tenant_id, result='miss').inc()
                 time.sleep(0.1)
-
             bisney_requests_total.labels(tenant_id=tenant_id, status='success').inc()
             return jsonify({"message": "Favorite toggled"}), 200
 
@@ -425,23 +373,30 @@ def favorite_product():
 
 @app.route('/simulation/<mode>', methods=['POST'])
 def toggle_simulation(mode):
+    global DDOS_START_TIME
     key = f"{mode}_mode"
     if key in SIMULATION_CONFIG:
         SIMULATION_CONFIG[key] = not SIMULATION_CONFIG[key]
-        logger.warning(f"Simulation toggled", extra={"event": "sim_toggle", "mode": key, "active": SIMULATION_CONFIG[key]})
+        
+        # RECORD START TIME for DDoS
+        if mode == 'ddos':
+            if SIMULATION_CONFIG[key]:
+                DDOS_START_TIME = time.time() # Attack Started!
+            else:
+                DDOS_START_TIME = 0 # Attack Stopped
+        
         return jsonify({"mode": mode, "active": SIMULATION_CONFIG[key]}), 200
     return jsonify({"error": "Invalid mode"}), 400
 
 @app.route('/metrics')
 def metrics():
     if SIMULATION_CONFIG["latency_mode"]:
-        lag = random.randint(600, 1200) # Disaster lag
+        lag = random.randint(600, 1200) 
     else:
-        lag = random.randint(5, 7) # Normal lag
-    
+        lag = random.randint(5, 30)
     bisney_inventory_lag.labels(tenant_id="merch").set(lag)
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
 
 if __name__ == '__main__':
-    logger.info("Bisney v2.3 Starting...", extra={"event": "startup"})
+    logger.info("Bisney v2.4 Starting...", extra={"event": "startup"})
     app.run(host='0.0.0.0', port=5001, debug=False, threaded=True)
