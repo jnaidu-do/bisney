@@ -437,7 +437,7 @@ def metrics():
     if SIMULATION_CONFIG["latency_mode"]:
         lag = random.randint(600, 1200) # Disaster lag
     else:
-        lag = random.randint(5, 30) # Normal lag
+        lag = random.randint(5, 7) # Normal lag
     
     bisney_inventory_lag.labels(tenant_id="merch").set(lag)
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
