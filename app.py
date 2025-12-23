@@ -87,61 +87,48 @@ def inject_latency():
 # --- CONTROLLED DDOS GENERATOR (~500 RPS) ---
 # --- EXPONENTIAL DDOS GENERATOR ---
 # --- AGGRESSIVE EXPONENTIAL DDOS GENERATOR ---
+# --- ECO-MODE DDOS GENERATOR (Safe for Small Droplets) ---
 def background_ddos_generator():
     """
-    Hyper-Aggressive Attacker:
-    - Zero sleep between requests (Fire hose)
-    - Ramps up traffic volume every 2 seconds
-    - Uses 20 parallel threads to bypass blocking I/O
+    Eco-Mode Attacker:
+    - distinct pauses to let the CPU breathe.
+    - Uses Session pooling for efficiency, but throttles speed.
+    - Targets ~50 RPS per thread.
     """
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50)
+    # Pool size matches our batch size to avoid recreating connections
+    adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
     session.mount('http://', adapter)
     
     base_url = 'http://127.0.0.1:5001'
     
-    # AGGRESSIVE CONFIG
-    batch_size = 1       # Requests per cycle per thread
-    max_batch = 100      # Cap per thread (20 threads * 100 = 2000 RPS potential)
-    last_ramp_time = time.time()
-    
     while True:
         if SIMULATION_CONFIG["ddos_mode"]:
             try:
-                # 1. Fire the batch sequentially (Fast as possible)
-                count = int(batch_size)
-                for _ in range(count):
-                    # Timeout is tiny (0.01s) - we don't care about the response, just the hit
+                # Fire a small, fixed batch of 5 requests
+                for _ in range(5):
                     try:
                         if random.random() > 0.5:
-                            session.post(f'{base_url}/cart', json={"product_name": "DDoS-Bot", "tenant": "attacker"}, timeout=0.01)
+                            # Short timeout so we don't hang if server lags
+                            session.post(f'{base_url}/cart', json={"product_name": "DDoS-Bot", "tenant": "attacker"}, timeout=0.05)
                         else:
-                            session.post(f'{base_url}/favorite', json={"product_id": 999, "tenant": "attacker"}, timeout=0.01)
+                            session.post(f'{base_url}/favorite', json={"product_id": 999, "tenant": "attacker"}, timeout=0.05)
                     except:
-                        pass # Ignore timeouts, just keep firing
+                        pass # Just skip failed requests
 
-                # 2. Ramp Up Logic (Double load every 2.0 seconds)
-                now = time.time()
-                if now - last_ramp_time > 2.0:
-                    if batch_size < max_batch:
-                        batch_size = batch_size * 2.0  # DOUBLING
-                        print(f"🚀 DDoS RAMP UP: {int(batch_size)} reqs/batch per thread")
-                    last_ramp_time = now
-
-                # 3. Micro-Sleep (0.01s) just to yield CPU slightly
-                time.sleep(0.01) 
+                # CRITICAL: Sleep 0.1s to yield CPU to the main server thread
+                # Calculation: 5 reqs / 0.1s pause = ~50 requests per second per thread
+                time.sleep(0.1) 
                 
             except Exception:
-                time.sleep(0.1)
+                # If massive errors, back off more
+                time.sleep(0.5)
         else:
-            # Reset Logic
-            batch_size = 1
-            last_ramp_time = time.time()
+            # Sleep while idle
             time.sleep(1.0)
 
-# Start 20 concurrent attacker threads (The "Swarm")
-# 20 threads * 50 RPS each = ~1000 RPS Total
-for _ in range(20):
+# Start 3 concurrent attacker threads (Safe, Steady Load)
+for _ in range(3):
     threading.Thread(target=background_ddos_generator, daemon=True).start()
 
 # --- HTML UI ---
